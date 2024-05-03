@@ -1,4 +1,5 @@
-This is my second attempt at making a PIC clock.  The original used the PIC16F18313 which only had 6 I/O pins.  This one is different since it uses the MCP7940M real time clock with I2C.  Surprisingly this one uses less program memory unlike the first one (both chips have 3.5 kb of programmable memory).
+This is my second attempt at making a PIC clock it uses all 12 I/O pins.  The original used the PIC16F18313 which only had 6 I/O pins.  This one is different since it uses the MCP7940M real time clock with I2C.  Surprisingly this one uses less program memory unlike the first one (both chips have 3.5 kb of programmable memory).  
+
 The actual circuitry is very similiar to the original clock, but this one does not use the SN74HC165N shift register.  So the actual supplies I used didn't really change.
 So the supplies I ended up using were the following (excludes wires).
 
@@ -23,4 +24,6 @@ So the supplies I ended up using were the following (excludes wires).
     2 SN74HC595N Shift Registers
 
     1 MCP7940M real time clock.
-I will upload a schematic and potential PCB design at some point.
+I will upload a schematic and potential PCB design at some point.  
+
+NOTE: if you want to use this, something to note is that RA3 will always be held HIGH or LOW if you leave the MCLRE pin plugged into your pickit (held in reset vs not in reset).  So once you've uploaded the program unplug the MCLRE wire connected to your pickit (assuming you're using one).  When I was working on this, I didn't know this, so hopefully you won't run into this problem.  

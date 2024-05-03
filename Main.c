@@ -20,6 +20,7 @@
 #define LOW 0
 //the last bit is there so that we can bitwrite to it.
 #define RTC_Clock_Address 0b11011110
+void updateAlarm(void);
 void updateMMSS(void);
 void Shift_Out(unsigned char);
 void displayDigit(unsigned char, unsigned char);
@@ -43,7 +44,7 @@ void I2C_Start(void);
 void I2C_Transmission(unsigned char);
 void I2C_ReadHHMMRegister(void);
 void I2C_WriteHHMM(void);
-unsigned char I2C_ReadRegister(unsigned char);
+unsigned char I2C_ReadClockRegister(unsigned char);
 
 //7-segment binary representation.
 
@@ -78,9 +79,8 @@ __bit Pressed = 0;
 __bit RanOutOfTime = 0;
 //this is for determing if a button is pressed or being released. 0 implies it's being pressed
 //while 1 implies it's being released.
-__bit TMR1Debounce=0;
+__bit TMR1Debounce = 0;
 unsigned int TMR2count = 0;
-unsigned int TMR0count=0;
 //data will be changed based on interrupts caused by rising edge/falling edge.
 unsigned char data = 0;
 
@@ -89,21 +89,20 @@ void updateMMSS(void) {
     for (signed char i = 3; i >= 0; i--) {
         //if the current entry is zero move to the next entry.
         if (mmss[i] != 0) {
-            mmss[i]-= 1;
-            
+            mmss[i] -= 1;
+
             //if we're updating the tens second posisition we need to update the ones second digit accordingly.
-            if (i ==2) {
+            if (i == 2) {
                 mmss[3] = 9;
-            }                //special case, since the tens of the second posistion must be less than 6.
+            }//special case, since the tens of the second posistion must be less than 6.
             else if (i == 1) {
                 mmss[2] = 5;
-                mmss[3]=9;
-            }
-            //if we're updating the tens minute digit everything to the right must be updated accordingly.
-            else if (i==0){
-                mmss[1]=9;
-                mmss[2]=5;
-                mmss[3]=9;
+                mmss[3] = 9;
+            }                //if we're updating the tens minute digit everything to the right must be updated accordingly.
+            else if (i == 0) {
+                mmss[1] = 9;
+                mmss[2] = 5;
+                mmss[3] = 9;
             }
             //End
             return;
@@ -113,20 +112,38 @@ void updateMMSS(void) {
     RanOutOfTime = 1;
 }
 
-void __interrupt() ISR(void) {
-    //I plan on removing this and using RA3 to generate interrupts every minute from the RTC.
-    //That way we're not polling the RTC and we can avoid weird circumstances where timer0 starts drifting a little bit.
-    if (TMR0IF){
-        TMR0count++;
-        //we want to read the RTC every 0.25 seconds.  it's better to check more often
-        //in case the clock drifts at all.
-        if (TMR0count==1000){
-            TMR0count=0;
-            I2C_ReadHHMMRegister();
+void updateAlarm(void) {
+    //read the minutes register.
+    unsigned char minutes[2] = {0, 0};
+    unsigned char temp = I2C_ReadClockRegister(0x01);
+    //get correct time
+    minutes[0] = (temp & 0b01110000) >> 4;
+    minutes[1] = temp & 0b00001111;
+    //logic for updating minutes accordingly. updates the tens when the ones place is a 9.
+    if (minutes[1] == 9) {
+        if (minutes[0] == 5) {
+            minutes[0] = 0;
+        } else {
+            minutes[0]++;
         }
-        TMR0=131;
-        TMR0IF=0;
     }
+    //this adjusts accordingly when the ones place of minutes is 9.
+    minutes[1] = GenericTimetable[minutes[1] + 1];
+    temp = minutes[1] | (minutes[0] << 4);
+    //update alarm time.
+    I2C_Start();
+    //minutes register
+    I2C_Transmission(0x0B);
+    //update minutes
+    I2C_Write(temp);
+    //write to hours to get to the alarm settings register
+    I2C_Write(0);
+    //clear alarm interrupt bit while preserving settings
+    I2C_Write(0b00010000);
+    I2C_Stop();
+}
+
+void __interrupt() ISR(void) {
     if (TMR2IF) {
         TMR2count++;
         TMR2 = 131;
@@ -139,23 +156,24 @@ void __interrupt() ISR(void) {
     }
     //poll for inputs every 50 milliseconds.
     if (TMR1IF) {
-        data=PORTA&0b00000111;
-        data=data|((PORTC&0b00000111)<<3);
-        if (Pressed&&data==0){
-            Pressed=0;
-        }
-        else if (!Pressed&&data>0){
-            Pressed=1;
-        }
-        //user is holding down button.
+        data = PORTA & 0b00000111;
+        data = data | ((PORTC & 0b00000111) << 3);
+        if (Pressed && data == 0) {
+            Pressed = 0;
+        } else if (!Pressed && data > 0) {
+            Pressed = 1;
+        }            //user is holding down button.
         else {
-            data=0;
+            data = 0;
         }
         TMR1 = 15536;
         TMR1IF = 0;
     }
-    if (SSP1IF){
-        SSP1IF=0;
+    if (IOCAF3) {
+        updateAlarm();
+        //Read updated time
+        I2C_ReadHHMMRegister();
+        IOCAF3 = 0;
     }
 }
 //this method shifts out data to a 74hc595 shift register.
@@ -184,8 +202,8 @@ void displayDigit(unsigned char number, unsigned char digit) {
     Shift_Out(digit);
     RCLK_LATA = 1;
     //wait until there is new data.
-    data=0;
-    while (data==0&&!RanOutOfTime);
+    data = 0;
+    while (data == 0 && !RanOutOfTime);
 }
 //increment or decrement the currently selected number.
 
@@ -216,8 +234,6 @@ void ChangeTimedigit(_Bool isClock, unsigned char digit, unsigned char number[],
 //if it's a timer it's zero.
 
 _Bool ConfigureTime(_Bool isClock) {
-    //disable timer0 while we're in this mode.  No need to look at the RTC editing the time.
-    T0EN=0;
     unsigned char number[4] = {0};
     signed char currentdigit = 0;
     while (data != 0b00100000) {
@@ -253,13 +269,13 @@ _Bool ConfigureTime(_Bool isClock) {
     for (unsigned char i = 0; i < 4; i++) {
         if (isClock) {
             hhmm[i] = number[i];
-            
+
         } else {
             mmss[i] = number[i];
         }
     }
     //update RTC
-    if (isClock){
+    if (isClock) {
         I2C_WriteHHMM();
     }
     return 1;
@@ -275,13 +291,13 @@ void TimerButtonMenu(void) {
     }//exit timer mode.  Just set the timer to 0.
     else if (data == 0b00010000) {
         RanOutOfTime = 1;
-        mmss[0]=0;
-        mmss[1]=0;
-        mmss[2]=0;
-        mmss[3]=0;
+        mmss[0] = 0;
+        mmss[1] = 0;
+        mmss[2] = 0;
+        mmss[3] = 0;
     }
-    if (data>0){
-    data = 0;
+    if (data > 0) {
+        data = 0;
     }
 }
 //timer display.
@@ -297,16 +313,16 @@ void DisplayTMR(void) {
 }
 
 void TimerMode(void) {
-    
+
     //setup start time
     //if not 1, end the method we're exiting.
-    
+
     if (!ConfigureTime(0)) {
         return;
     }
     //Start Timer 2.
     TMR2ON = 1;
-    data=0;
+    data = 0;
     while (RanOutOfTime == 0) {
         DisplayTMR();
         TimerButtonMenu();
@@ -326,7 +342,7 @@ void TimerMode(void) {
         }
         i++;
     }
-    RanOutOfTime=0;
+    RanOutOfTime = 0;
 }
 //do something based on which button is pressed.  This method allows the user to set the time and use timer mode.
 
@@ -335,10 +351,8 @@ void buttonmenu(void) {
     if (data == 0b00000001) {
         //Setup Clock.  If they exit do nothing, otherwise reset the timer register and reset TMR1count.
         //the one in the method call is so the method knows we're changing the clock's time.
-        if (ConfigureTime(1)) {
-        }
-    }
-        //Set Timer Mode use seperate timer module so that we can keep the original time constantly updated.
+        ConfigureTime(1);
+    }        //Set Timer Mode use seperate timer module so that we can keep the original time constantly updated.
     else if (data == 0b00000010) {
         //preload TMR2 with 131, that way we can guarantee that we get a 0.001 second delay.
         TMR2 = 131;
@@ -358,22 +372,15 @@ void DisplayTime(void) {
 
     }
 }
-//we need to define I2C methods at some point.
 
-/*
- * To redo all the timers from the original clock, we need to call the MCP7940M
- * chip.  Use two timers to check periodically.
- * Use third timer for debouncing.  Drive the display like before.
- * Also store time variables correctly (no need to do tedious calculations).
- */
 void I2C_Init(void) {
-    TRISA5=1;
-    TRISA4=1;
+    TRISA5 = 1;
+    TRISA4 = 1;
     //turn on master mode and clear other SSP1CON registers.
     SSP1CON1 = 0b00101000;
     SSP1CON2 = 0;
     //SSP1CON3 = 0;
-    SSP1STAT=0;
+    SSP1STAT = 0;
     //Fclock=100kHz with this BRG value.
     SSP1ADD = 0x4F;
     //set RA5 and RA4 as SDA and SCL pins respecively.
@@ -381,46 +388,44 @@ void I2C_Init(void) {
     RA4PPS = 0b00011000;
     SSP1DATPPS = 0b00000101;
     SSP1CLKPPS = 0b00000100;
-    SSP1IE=0;
-    SSP1IF=0;
+    SSP1IE = 0;
+    SSP1IF = 0;
 }
 
 void I2C_Wait(void) {
     /*We need to wait for the start, stop, etc to finish.
     //the datasheet says to bitwise or the third bit of SSP1CON1 with the start, stop, etc bits.
     //when this is zero, we know that said conditions are finished.*/
-    while (((SSP1STAT & 0b00000100) | (SSP1CON2 & 0b00011111))){
-        
-    }
-
+    while (((SSP1STAT & 0b00000100) | (SSP1CON2 & 0b00011111)));
 }
 
 unsigned char I2C_Write(unsigned char sdata) {
     //Wait then write
     I2C_Wait();
     //Write
-    SSP1BUF=sdata;
+    SSP1BUF = sdata;
     I2C_Wait();
     return ACKSTAT;
 }
-//general transmission
+//general transmission to a specific register must write data after calling.
+
 void I2C_Transmission(unsigned char sdata) {
     I2C_Write(RTC_Clock_Address);
     I2C_Write(sdata);
 }
 //call this upon updating the current time.
-void I2C_WriteHHMM(void){
+
+void I2C_WriteHHMM(void) {
     //disable interrupts that way I2C is not interrupted mid-transfer (very unlikely, but best left alone).
-    T0EN=0;
-    TMR1ON=0;
+    TMR1ON = 0;
+    IOCAN3 = 0;
     //we're doing a sequential memory write but we need two temp variables
-    //hours
-    unsigned char temp1=(0b01000000|((hhmm[0]<<4)|hhmm[1]));
+    //hours how it is currently set up it will be in a 24 hour time format.
+    unsigned char temp1 = (0b00000000 | ((hhmm[0] << 4) | hhmm[1]));
     //minutes
-    unsigned char temp2=(0b00000000|(hhmm[2]<<4)|hhmm[3]);
+    unsigned char temp2 = (0b00000000 | (hhmm[2] << 4) | hhmm[3]);
     I2C_Start();
-    I2C_Write(RTC_Clock_Address);
-    I2C_Write(0x00);
+    I2C_Transmission(0x00);
     //disable the clock while we're changing register values also set seconds value to zero.
     I2C_Write(0);
     I2C_Write(temp2);
@@ -428,27 +433,30 @@ void I2C_WriteHHMM(void){
     I2C_Stop();
     //Need to go back to the first posistion in memory.
     I2C_Start();
-    I2C_Write(RTC_Clock_Address);
-    I2C_Write(0x00);
+    I2C_Transmission(0x00);
     //restart the clock.
     I2C_Write(0b10000000);
     I2C_Stop();
-    T0EN=1;
-    TMR1ON=1;
+    //set alarm to go off next minute.
+    updateAlarm();
+    I2C_ReadHHMMRegister();
+    TMR1ON = 1;
+    IOCAN3 = 1;
 }
 //general read method.  Need to write slave address first though.
+
 unsigned char I2C_Read(void) {
     I2C_Wait();
     //set RCEN bit high, then wait for it to clear then read SSP1BUF register.
-    RCEN=1;
+    RCEN = 1;
     I2C_Wait();
     return SSP1BUF;
 }
 //This is for reading a specific register.  Plan on doing something with the alarm functionality of the RTC.
+
 unsigned char I2C_ReadClockRegister(unsigned char registeraddress) {
     //disable interrupts that way I2C is not interrupted mid-transfer (very unlikely, but best left alone).
-    T0EN=0;
-    TMR1ON=0;
+    TMR1ON = 0;
     I2C_Start();
     I2C_Transmission(registeraddress);
     I2C_Restart();
@@ -458,17 +466,16 @@ unsigned char I2C_ReadClockRegister(unsigned char registeraddress) {
     I2C_NACK();
     I2C_Stop();
     //disable interrupts that way I2C is not interrupted mid-transfer (very unlikely, but best left alone).
-    T0EN=1;
-    TMR1ON=1;
+    TMR1ON = 1;
     return temp;
 }
 //Read the minutes and hour register of the RTC
-void I2C_ReadHHMMRegister(void){
-    unsigned char temp1=0;
-    unsigned char temp2=0;
+
+void I2C_ReadHHMMRegister(void) {
+    unsigned char temp1 = 0;
+    unsigned char temp2 = 0;
     //disable interrupts that way I2C is not interrupted mid-transfer (very unlikely, but best left alone).
-    T0EN=0;
-    TMR1ON=0;
+    TMR1ON = 0;
     I2C_Start();
     //0x01 is the minutes register.
     I2C_Transmission(0x01);
@@ -478,18 +485,17 @@ void I2C_ReadHHMMRegister(void){
     temp1 = I2C_Read();
     I2C_ACK();
     //This is sequential memory read, so it goes to the next register which is the hours register.
-    temp2=I2C_Read();
+    temp2 = I2C_Read();
     //send NACK to indicate end of reading.
     I2C_NACK();
     I2C_Stop();
-    hhmm[3]=(temp1&0b00001111);
-    hhmm[2]=(temp1&0b01110000)>>4;
-    hhmm[1]=(temp2&0b00001111);
-    hhmm[0]=(temp2&0b00110000)>>4;
-    T0EN=1;
-    TMR1ON=1;
-    
+    hhmm[3] = (temp1 & 0b00001111);
+    hhmm[2] = (temp1 & 0b01110000) >> 4;
+    hhmm[1] = (temp2 & 0b00001111);
+    hhmm[0] = (temp2 & 0b00110000) >> 4;
+    TMR1ON = 1;
 }
+
 void I2C_Start(void) {
     I2C_Wait();
     SEN = 1;
@@ -516,26 +522,41 @@ void I2C_NACK(void) {
     ACKDT = 1;
     ACKEN = 1;
 }
+//setup on startup
+
+void setupAlarm(void) {
+    I2C_Start();
+    I2C_Transmission(0x0B);
+    //setup first alarm to go off one minute later (start at 00:00 alarm at 00:01)
+    I2C_Write(0b00000001);
+    //set hours register to zero that way we can get to the setup address.
+    I2C_Write(0);
+    //setup Alarm set to go off on matching minutes.  Outputs logic LOW. read on RA3.
+    I2C_Write(0b00010000);
+    I2C_Stop();
+    I2C_Start();
+    //RTC control register
+    I2C_Transmission(0x07);
+    //Enable alarm0
+    I2C_Write(0b00010000);
+    I2C_Stop();
+}
 
 void main(void) {
+    //nothing is analog clear analog registers
     ANSELA = 0;
     ANSELC = 0;
     //Set TRIS registers. RA2-RA0 and RC2-RC0 are inputs.
     //RA4-5 are set to inputs for i2c communication as indicated by the datasheet.
     TRISA = 0xff;
+    //clear WPUA3 the internal pull up resistor on RA3.
+    WPUA3=0;
     TRISC = 0b00000111;
-    //Rising edge and Falling edge enable bits
+    //clear LATx registers.
+    LATA = 0;
+    LATC = 0;
     //put the device in the idle state when SLEEP() is called.  Sleep will only be called when editing time.
     //IDLEN = 1;
-    //setup timer0
-    TMR0IE = 1;
-    TMR0IF = 0;
-    //Clock source is FOSC/4 and prescaler is 64 and TMR0 is synchronized to FOSC/4
-    T0CON1 = 0b01010110;
-    //we want an 8-bit timer.
-    T016BIT = 0;
-    //preload timer0
-    TMR0=131;
     //Setup timer 2.  But don't enable the module.
     //we only need to set the prescaler, and it's 64 in this case.
     T2CONbits.T2CKPS = 0b11;
@@ -544,25 +565,25 @@ void main(void) {
     //An interrupt is caused when TMR2==PR2 according to the datasheet.
     //Set PR2 to 255.
     PR2 = 0xff;
-    //Setup Timer1 module
+    //Setup Timer1 module for polling inputs
     //clock source is FOSC/4 and prescaler is 8.
-    T1CON=0b00110000;
+    T1CON = 0b00110000;
     //we don't want this register to be used.  We don't need the timer gate functionality.
-    T1GCON=0b00000000;
-    TMR1=15536;
-    TMR1IF=0;
-    TMR1IE=1;
+    T1GCON = 0b00000000;
+    TMR1 = 15536;
+    TMR1IF = 0;
+    TMR1IE = 1;
     //enable interrupts.
     GIE = 1;
     PEIE = 1;
     //setup RTC clock and I2C.  Always set it to 00:00.  The RTC does not have a backup battery (the chip doesn't allow it).
-    LATA=0;
-    LATC=0;
     I2C_Init();
+    setupAlarm();
     I2C_WriteHHMM();
-    I2C_ReadHHMMRegister();
+    //this is for reading the alarm.
+    IOCAN3 = 1;
+    IOCAF3=0;
     TMR1ON=1;
-    T0EN=1;
     while (1) {
         DisplayTime();
         buttonmenu();
